@@ -5,12 +5,22 @@
  *
  * 根據系統資源自動計算最佳的 PHP-FPM pool 配置參數
  * 支援 PHP 7.1+
+ *
+ * 此檔案為向後相容入口，內部呼叫新的模組化架構。
+ * 建議使用 bin/tuner 作為主要入口。
+ *
+ * 新架構說明：
+ *   bin/tuner   - 參數計算
+ *   bin/collect - 監控收集
+ *   bin/analyze - 配置分析
  */
 
 // =============================================================================
 // 可調整參數 (Configuration)
 // =============================================================================
-// 修改以下參數可自訂計算行為，詳細說明請參考 docs/FORMULA.md
+// 這些參數可在此處直接修改（向後相容），
+// 或使用 --config 指定配置檔（建議方式）。
+// 詳細說明請參考 docs/FORMULA.md
 
 /**
  * 記憶體保留比例
@@ -96,200 +106,53 @@ $config['request_terminate_timeout'] = 30;
 $config['request_slowlog_timeout'] = 5;
 
 // =============================================================================
-// Polyfills for PHP < 7.2 and PHP < 8.2
+// 執行
 // =============================================================================
 
-// PHP_OS_FAMILY polyfill (PHP 7.2+)
-if (!defined('PHP_OS_FAMILY')) {
-    if (stripos(PHP_OS, 'WIN') === 0) {
-        define('PHP_OS_FAMILY', 'Windows');
-    } elseif (stripos(PHP_OS, 'Darwin') === 0) {
-        define('PHP_OS_FAMILY', 'Darwin');
-    } else {
-        define('PHP_OS_FAMILY', 'Linux');
-    }
-}
+// 載入新架構
+require_once __DIR__ . '/lib/bootstrap.php';
 
-// ini_parse_quantity polyfill (PHP 8.2+)
-if (!function_exists('ini_parse_quantity')) {
-    function ini_parse_quantity($value) {
-        if (is_numeric($value)) {
-            return (int) $value;
+// 如果直接執行此檔案，使用上方定義的配置執行計算
+if (php_sapi_name() === 'cli' && realpath($argv[0]) === realpath(__FILE__)) {
+    // 收集系統資訊
+    $systemInfo = SystemInfo::collect($config);
+
+    // 計算參數
+    $params = Calculator::calculate($systemInfo, $config);
+
+    // 錯誤處理
+    if ($params['error']) {
+        fwrite(STDERR, "# 警告：{$params['message']}\n");
+        if (isset($params['details'])) {
+            fwrite(STDERR, "# 可用記憶體: {$params['details']['free_memory']} MB\n");
+            fwrite(STDERR, "# Worker 記憶體: {$params['details']['worker_memory']} MB\n");
+            fwrite(STDERR, "# 記憶體保留: " . ($params['details']['memory_reserve_ratio'] * 100) . "%\n");
         }
-
-        $value = trim($value);
-        $unit = strtolower(substr($value, -1));
-        $number = (int) substr($value, 0, -1);
-
-        switch ($unit) {
-            case 'g':
-                $number *= 1024 * 1024 * 1024;
-                break;
-            case 'm':
-                $number *= 1024 * 1024;
-                break;
-            case 'k':
-                $number *= 1024;
-                break;
-        }
-
-        return $number;
-    }
-}
-
-// =============================================================================
-// Core Functions
-// =============================================================================
-
-function getCpuCores() {
-    if (PHP_OS_FAMILY === 'Windows') {
-        $cores = shell_exec('echo %NUMBER_OF_PROCESSORS%');
-    } elseif (PHP_OS_FAMILY === 'Darwin') {
-        $cores = shell_exec('sysctl -n hw.ncpu');
-    } else {
-        $cores = shell_exec('nproc');
+        exit(1);
     }
 
-    return max(1, (int) $cores);
+    // 輸出結果（保持原格式）
+    $reservePercent = $params['memory_reserve_ratio'] * 100;
+
+    echo "# PHP-FPM Tuner 計算結果\n";
+    echo "# ─────────────────────────────────────\n";
+    echo "# 系統資訊:\n";
+    echo "#   CPU 核心數: {$systemInfo['cpu_cores']}\n";
+    echo "#   可用記憶體: {$systemInfo['free_memory']} MB\n";
+    echo "#   Worker 記憶體: {$systemInfo['worker_memory']} MB\n";
+    echo "#   記憶體保留: {$reservePercent}%\n";
+    echo "# ─────────────────────────────────────\n";
+    echo "\n";
+    echo "; Process Manager 設定\n";
+    echo "pm = dynamic\n";
+    echo "pm.max_children = {$params['max_children']}\n";
+    echo "pm.start_servers = {$params['start_servers']}\n";
+    echo "pm.min_spare_servers = {$params['min_spare_servers']}\n";
+    echo "pm.max_spare_servers = {$params['max_spare_servers']}\n";
+    echo "pm.max_requests = {$params['max_requests']}\n";
+    echo "\n";
+    echo "; 請求處理設定\n";
+    echo "request_terminate_timeout = {$params['request_terminate_timeout']}\n";
+    echo "request_slowlog_timeout = {$params['request_slowlog_timeout']}\n";
+    echo "; slowlog = /var/log/php-fpm/slow.log\n";
 }
-
-function getFreeMemory() {
-    $freeMemory = 0;
-
-    if (PHP_OS_FAMILY === 'Windows') {
-        if (preg_match('~(\d+)~', shell_exec('wmic OS get FreePhysicalMemory'), $matches)) {
-            $freeMemory = round((int) $matches[1] / 1024);
-        }
-    } elseif (PHP_OS_FAMILY === 'Darwin') {
-        // macOS: 使用 vm_stat 計算可用記憶體
-        $pageSize = (int) shell_exec('pagesize');
-        $vmStat = shell_exec('vm_stat');
-        if ($pageSize && $vmStat) {
-            $free = 0;
-            if (preg_match('~Pages free:\s+(\d+)~', $vmStat, $matches)) {
-                $free += (int) $matches[1];
-            }
-            if (preg_match('~Pages inactive:\s+(\d+)~', $vmStat, $matches)) {
-                $free += (int) $matches[1];
-            }
-            if (preg_match('~Pages purgeable:\s+(\d+)~', $vmStat, $matches)) {
-                $free += (int) $matches[1];
-            }
-            $freeMemory = round($free * $pageSize / 1024 / 1024);
-        }
-    } else {
-        // Linux
-        $meminfo = shell_exec('cat /proc/meminfo');
-
-        // 優先使用 MemAvailable（更準確）
-        if ($meminfo && preg_match('~MemAvailable:\s+(\d+)\s+~', $meminfo, $matches)) {
-            $freeMemory = $matches[1] / 1024;
-        }
-        // 回退：MemFree + Buffers + Cached
-        elseif ($meminfo && preg_match_all('~(MemFree|Buffers|Cached):\s+(\d+)\s+~', $meminfo, $matches, PREG_SET_ORDER)) {
-            $total = 0;
-            foreach ($matches as $match) {
-                // 只計算 MemFree, Buffers, 第一個 Cached（避免 SwapCached）
-                if ($match[1] === 'Cached' || $match[1] === 'MemFree' || $match[1] === 'Buffers') {
-                    $total += (int) $match[2];
-                }
-            }
-            $freeMemory = $total / 1024;
-        }
-    }
-
-    return (int) $freeMemory;
-}
-
-function getWorkerMemory() {
-    $processMemory = 0;
-
-    if (PHP_OS_FAMILY !== 'Windows') {
-        $psOutput = shell_exec('ps -eo size,command 2>/dev/null');
-        if ($psOutput && preg_match_all('~(\d+).*php-fpm: pool~', $psOutput, $matches, PREG_PATTERN_ORDER)) {
-            if (count($matches[1]) > 0) {
-                $processMemory = round(array_sum($matches[1]) / count($matches[1]) / 1024);
-            }
-        }
-    }
-
-    // 回退：使用 memory_limit
-    if ($processMemory <= 0) {
-        $memoryLimit = ini_get('memory_limit');
-        if ($memoryLimit && $memoryLimit !== '-1') {
-            $processMemory = round(ini_parse_quantity($memoryLimit) / 1048576);
-        }
-    }
-
-    // 確保最小值，避免除以零
-    global $config;
-    return max($config['min_worker_memory'], (int) $processMemory);
-}
-
-// =============================================================================
-// Main Calculation
-// =============================================================================
-
-$cpuCores = getCpuCores();
-$freeMemory = getFreeMemory();
-$workerMemory = getWorkerMemory();
-
-// 計算 max_children（使用配置的記憶體保留比例）
-$memoryReserve = round($config['memory_reserve_ratio'] * $freeMemory);
-$maxChildren = floor(($freeMemory - $memoryReserve) / $workerMemory);
-
-// 錯誤處理：記憶體不足
-if ($maxChildren < 1) {
-    fwrite(STDERR, "# 警告：可用記憶體不足，無法啟動 PHP-FPM worker\n");
-    fwrite(STDERR, "# 可用記憶體: {$freeMemory} MB\n");
-    fwrite(STDERR, "# Worker 記憶體: {$workerMemory} MB\n");
-    fwrite(STDERR, "# 記憶體保留: " . ($config['memory_reserve_ratio'] * 100) . "%\n");
-    exit(1);
-}
-
-// 計算 spare servers 參數（使用配置的比例和 CPU 倍數）
-$minSpareServers = min(
-    round($config['min_spare_ratio'] * $maxChildren),
-    $cpuCores * $config['min_spare_cpu_multiplier']
-);
-$maxSpareServers = min(
-    round($config['max_spare_ratio'] * $maxChildren),
-    $cpuCores * $config['max_spare_cpu_multiplier']
-);
-$startServers = min(
-    round($config['start_servers_ratio'] * $maxChildren),
-    $cpuCores * $config['start_servers_cpu_multiplier']
-);
-
-// 確保邏輯一致性：min_spare <= start <= max_spare
-$minSpareServers = max(1, $minSpareServers);
-$maxSpareServers = max($minSpareServers, $maxSpareServers);
-$startServers = max($minSpareServers, min($startServers, $maxSpareServers));
-
-// =============================================================================
-// Output
-// =============================================================================
-
-$reservePercent = $config['memory_reserve_ratio'] * 100;
-
-echo "# PHP-FPM Tuner 計算結果\n";
-echo "# ─────────────────────────────────────\n";
-echo "# 系統資訊:\n";
-echo "#   CPU 核心數: {$cpuCores}\n";
-echo "#   可用記憶體: {$freeMemory} MB\n";
-echo "#   Worker 記憶體: {$workerMemory} MB\n";
-echo "#   記憶體保留: {$reservePercent}%\n";
-echo "# ─────────────────────────────────────\n";
-echo "\n";
-echo "; Process Manager 設定\n";
-echo "pm = dynamic\n";
-echo "pm.max_children = {$maxChildren}\n";
-echo "pm.start_servers = {$startServers}\n";
-echo "pm.min_spare_servers = {$minSpareServers}\n";
-echo "pm.max_spare_servers = {$maxSpareServers}\n";
-echo "pm.max_requests = {$config['max_requests']}\n";
-echo "\n";
-echo "; 請求處理設定\n";
-echo "request_terminate_timeout = {$config['request_terminate_timeout']}\n";
-echo "request_slowlog_timeout = {$config['request_slowlog_timeout']}\n";
-echo "; slowlog = /var/log/php-fpm/slow.log\n";

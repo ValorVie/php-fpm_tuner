@@ -1,0 +1,140 @@
+#!/usr/bin/env php
+<?php
+
+/**
+ * PHP-FPM Tuner - 參數計算入口
+ *
+ * 用法：
+ *   php bin/tuner [選項]
+ *
+ * 選項：
+ *   --config <path>          指定配置檔路徑
+ *   --memory-reserve <ratio> 記憶體保留比例 (0-1)
+ *   --json                   以 JSON 格式輸出
+ *   -h, --help               顯示說明
+ */
+
+require_once __DIR__ . '/../lib/bootstrap.php';
+
+// =============================================================================
+// 解析參數
+// =============================================================================
+
+$cliArgs = Config::fromCliArgs($argv);
+
+// 顯示說明
+if (isset($cliArgs['options']['help'])) {
+    echo <<<HELP
+PHP-FPM Tuner - 根據系統資源計算最佳 PHP-FPM pool 參數
+
+用法：
+  php bin/tuner [選項]
+
+選項：
+  --config <path>              指定配置檔路徑
+  --memory-reserve <ratio>     記憶體保留比例 (0-1)，預設 0.10
+  --min-worker-memory <mb>     Worker 最小記憶體 (MB)，預設 32
+  --json                       以 JSON 格式輸出
+  -h, --help                   顯示此說明
+
+範例：
+  # 使用預設配置
+  php bin/tuner
+
+  # 指定配置檔
+  php bin/tuner --config /path/to/config.php
+
+  # 調整記憶體保留比例（生產環境保守配置）
+  php bin/tuner --memory-reserve 0.20
+
+  # JSON 輸出（便於其他程式解析）
+  php bin/tuner --json
+
+HELP;
+    exit(0);
+}
+
+// =============================================================================
+// 載入配置
+// =============================================================================
+
+$config = Config::load($cliArgs['config_path']);
+$config = Config::merge($config, $cliArgs['overrides']);
+
+// 驗證配置
+$errors = Config::validate($config);
+if (!empty($errors)) {
+    fwrite(STDERR, "配置錯誤：\n");
+    foreach ($errors as $error) {
+        fwrite(STDERR, "  - {$error}\n");
+    }
+    exit(1);
+}
+
+// =============================================================================
+// 收集系統資訊並計算參數
+// =============================================================================
+
+$systemInfo = SystemInfo::collect($config);
+$params = Calculator::calculate($systemInfo, $config);
+
+// 錯誤處理
+if ($params['error']) {
+    fwrite(STDERR, "# 錯誤：{$params['message']}\n");
+    if (isset($params['details'])) {
+        fwrite(STDERR, "# 可用記憶體: {$params['details']['free_memory']} MB\n");
+        fwrite(STDERR, "# Worker 記憶體: {$params['details']['worker_memory']} MB\n");
+        fwrite(STDERR, "# 記憶體保留: " . ($params['details']['memory_reserve_ratio'] * 100) . "%\n");
+    }
+    exit(1);
+}
+
+// =============================================================================
+// 輸出結果
+// =============================================================================
+
+if (isset($cliArgs['options']['json'])) {
+    // JSON 輸出
+    $output = [
+        'system_info' => $systemInfo,
+        'config' => [
+            'memory_reserve_ratio' => $params['memory_reserve_ratio'],
+        ],
+        'parameters' => [
+            'pm' => 'dynamic',
+            'pm.max_children' => $params['max_children'],
+            'pm.start_servers' => $params['start_servers'],
+            'pm.min_spare_servers' => $params['min_spare_servers'],
+            'pm.max_spare_servers' => $params['max_spare_servers'],
+            'pm.max_requests' => $params['max_requests'],
+            'request_terminate_timeout' => $params['request_terminate_timeout'],
+            'request_slowlog_timeout' => $params['request_slowlog_timeout'],
+        ],
+    ];
+    echo json_encode($output, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . "\n";
+} else {
+    // 標準輸出（PHP-FPM 配置格式）
+    $reservePercent = $params['memory_reserve_ratio'] * 100;
+
+    echo "# PHP-FPM Tuner 計算結果\n";
+    echo "# ─────────────────────────────────────\n";
+    echo "# 系統資訊:\n";
+    echo "#   CPU 核心數: {$systemInfo['cpu_cores']}\n";
+    echo "#   可用記憶體: {$systemInfo['free_memory']} MB\n";
+    echo "#   Worker 記憶體: {$systemInfo['worker_memory']} MB\n";
+    echo "#   記憶體保留: {$reservePercent}%\n";
+    echo "# ─────────────────────────────────────\n";
+    echo "\n";
+    echo "; Process Manager 設定\n";
+    echo "pm = dynamic\n";
+    echo "pm.max_children = {$params['max_children']}\n";
+    echo "pm.start_servers = {$params['start_servers']}\n";
+    echo "pm.min_spare_servers = {$params['min_spare_servers']}\n";
+    echo "pm.max_spare_servers = {$params['max_spare_servers']}\n";
+    echo "pm.max_requests = {$params['max_requests']}\n";
+    echo "\n";
+    echo "; 請求處理設定\n";
+    echo "request_terminate_timeout = {$params['request_terminate_timeout']}\n";
+    echo "request_slowlog_timeout = {$params['request_slowlog_timeout']}\n";
+    echo "; slowlog = /var/log/php-fpm/slow.log\n";
+}

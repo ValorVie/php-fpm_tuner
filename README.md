@@ -1,14 +1,296 @@
-# PHP-FPM tuner
+# PHP-FPM Tuner
 
-Simple script that helps tuning PHP-FPM.
+根據系統資源自動計算最佳的 PHP-FPM pool 配置參數，並提供完整的監控與分析流程。
+
+## 功能
+
+- **參數計算**：根據 CPU 核心數、可用記憶體、worker 記憶體自動計算最佳配置
+- **監控收集**：從 PHP-FPM status 端點收集運行指標
+- **配置分析**：分析監控數據，計算 PES 分數並提供調整建議
+
+## 系統需求
+
+- PHP 7.1+
+- 無外部相依（純 PHP 標準函式庫）
+
+## 快速開始
+
+### 1. 計算建議參數
+
+```bash
+php bin/tuner
+```
+
+輸出範例：
+```
+# PHP-FPM Tuner 計算結果
+# ─────────────────────────────────────
+# 系統資訊:
+#   CPU 核心數: 4
+#   可用記憶體: 2048 MB
+#   Worker 記憶體: 64 MB
+#   記憶體保留: 10%
+# ─────────────────────────────────────
+
+pm = dynamic
+pm.max_children = 28
+pm.start_servers = 7
+pm.min_spare_servers = 7
+pm.max_spare_servers = 16
+pm.max_requests = 500
+```
+
+### 2. 收集監控數據
+
+啟用 PHP-FPM status（在 pool 配置中加入）：
+```ini
+pm.status_path = /fpm-status
+```
+
+收集指標：
+```bash
+# 單次收集
+php bin/collect --once --output /var/log/php-fpm/metrics.csv
+
+# 持續收集（每 60 秒）
+php bin/collect --interval 60
+
+# 使用 cron 每分鐘收集
+* * * * * /usr/bin/php /path/to/bin/collect --once
+```
+
+### 3. 分析配置效果
+
+```bash
+php bin/analyze --input /var/log/php-fpm/metrics.csv --max-children 28
+```
+
+輸出範例：
+```
+# PHP-FPM 配置分析報告
+# ═══════════════════════════════════════════════════════════════
+
+## PES 評分
+總分: 0.85 (良好)
+
+## 調整建議
+✅ 資訊: 當前配置運作良好，無需調整
+```
+
+## 完整調優流程
 
 ```
-❯ php php-fpm-tuner.php
-
-pm.max_children = 11
-start_servers = 3
-min_spare_servers = 3
-max_spare_servers = 8
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│  bin/tuner  │────▶│ bin/collect │────▶│ bin/analyze │
+│  計算參數   │     │  監控收集   │     │  分析建議   │
+└─────────────┘     └─────────────┘     └─────────────┘
+       │                  │                    │
+       ▼                  ▼                    ▼
+   套用配置           CSV 數據            調整建議
+                                              │
+                                              ▼
+                                      根據建議調整
+                                      重新執行 tuner
 ```
 
-The script calculates `pm.max_children` based on available free memory and memory used for each worker (it is either determined from currently running workers or php.ini memory limit). `start_servers`, `min_spare_servers`, and `max_spare_servers` are taking both memory limits and CPU cores available into account.
+### Step 1: 計算初始參數
+
+在目標伺服器上執行：
+
+```bash
+cd /path/to/php-fpm_tuner
+php bin/tuner
+```
+
+將輸出的參數套用到 PHP-FPM pool 配置：
+
+```bash
+# 備份現有配置
+sudo cp /etc/php-fpm.d/www.conf /etc/php-fpm.d/www.conf.bak
+
+# 編輯配置
+sudo vim /etc/php-fpm.d/www.conf
+```
+
+套用建議的參數後重載 PHP-FPM：
+
+```bash
+sudo systemctl reload php-fpm
+```
+
+### Step 2: 啟用 PHP-FPM Status
+
+在 pool 配置中加入（通常是 `/etc/php-fpm.d/www.conf`）：
+
+```ini
+; 啟用 status 端點
+pm.status_path = /fpm-status
+
+; 如果需要透過 TCP 存取（可選）
+pm.status_listen = 127.0.0.1:9001
+```
+
+重載 PHP-FPM：
+
+```bash
+sudo systemctl reload php-fpm
+```
+
+### Step 3: 設定監控收集
+
+**方法 A：使用 cron 定期收集（推薦）**
+
+```bash
+# 編輯 crontab
+crontab -e
+
+# 加入以下內容（每分鐘收集一次）
+* * * * * /usr/bin/php /path/to/php-fpm_tuner/bin/collect --once --output /var/log/php-fpm/metrics.csv 2>/dev/null
+```
+
+**方法 B：背景持續收集**
+
+```bash
+# 使用 nohup 背景執行
+nohup php bin/collect --interval 60 --output /var/log/php-fpm/metrics.csv &
+
+# 或使用 systemd service（更穩定）
+```
+
+### Step 4: 收集足夠數據
+
+建議收集至少 **24 小時** 的數據，以涵蓋：
+- 正常流量時段
+- 尖峰流量時段
+- 低流量時段
+
+檢查收集狀態：
+
+```bash
+# 查看已收集的數據量
+wc -l /var/log/php-fpm/metrics.csv
+
+# 查看最新幾筆數據
+tail -5 /var/log/php-fpm/metrics.csv
+```
+
+### Step 5: 分析並取得建議
+
+```bash
+# 基本分析
+php bin/analyze --input /var/log/php-fpm/metrics.csv
+
+# 指定當前配置以取得更精確的評估
+php bin/analyze --input /var/log/php-fpm/metrics.csv \
+    --max-children 30 \
+    --min-spare 8
+```
+
+### Step 6: 根據建議調整
+
+根據分析結果調整參數：
+
+| 建議類型 | 說明 | 調整方式 |
+|----------|------|----------|
+| 增加容量 | 佇列發生率過高 | `php bin/tuner --memory-reserve 0.05` |
+| Max 觸及 | max_children 不足 | `php bin/tuner --memory-reserve 0.05` |
+| 過度配置 | 利用率過低 | `php bin/tuner --memory-reserve 0.20` |
+| Spare 不足 | 閒置 worker 不夠 | 調整 min_spare_ratio |
+
+重新計算參數並套用：
+
+```bash
+# 例如：減少記憶體保留以增加 worker 數量
+php bin/tuner --memory-reserve 0.05
+
+# 或：增加記憶體保留（保守配置）
+php bin/tuner --memory-reserve 0.20
+```
+
+### Step 7: 持續監控（可選）
+
+建立監控迴圈，定期評估配置效果：
+
+```bash
+#!/bin/bash
+# weekly-analyze.sh - 每週執行一次
+
+# 分析過去一週的數據
+php /path/to/bin/analyze \
+    --input /var/log/php-fpm/metrics.csv \
+    --max-children 30 \
+    --json > /var/log/php-fpm/weekly-report.json
+
+# 可整合到告警系統
+```
+
+---
+
+## CLI 參考
+
+### bin/tuner
+
+```bash
+php bin/tuner [選項]
+
+選項：
+  --config <path>              指定配置檔路徑
+  --memory-reserve <ratio>     記憶體保留比例 (0-1)
+  --json                       以 JSON 格式輸出
+  -h, --help                   顯示說明
+```
+
+### bin/collect
+
+```bash
+php bin/collect [選項]
+
+選項：
+  --once                     單次收集後退出
+  --interval <seconds>       收集間隔（秒），預設 60
+  --output <path>            CSV 輸出路徑
+  --url <url>                PHP-FPM status URL
+  -h, --help                 顯示說明
+```
+
+### bin/analyze
+
+```bash
+php bin/analyze --input <path> [選項]
+
+選項：
+  --input <path>             CSV 輸入路徑（必要）
+  --max-children <n>         當前 max_children 設定
+  --min-spare <n>            當前 min_spare_servers 設定
+  --json                     以 JSON 格式輸出
+  -h, --help                 顯示說明
+```
+
+## 向後相容
+
+原有的使用方式仍然支援：
+
+```bash
+php php-fpm-tuner.php
+```
+
+## 配置
+
+可透過配置檔自訂參數：
+
+```bash
+php bin/tuner --config /path/to/config.php
+```
+
+配置檔範例請參考 `config/default.php`。
+
+## 文件
+
+- [計算公式說明](docs/FORMULA.md)
+- [動態調優方案](docs/DYNAMIC_TUNING.md)
+- [配置評估方法](docs/EVALUATION.md)
+- [架構說明](docs/ARCHITECTURE.md)
+
+## 授權
+
+MIT License

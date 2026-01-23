@@ -1,0 +1,172 @@
+#!/usr/bin/env php
+<?php
+
+/**
+ * PHP-FPM Analyzer - 配置分析入口
+ *
+ * 用法：
+ *   php bin/analyze [選項]
+ *
+ * 選項：
+ *   --input <path>           CSV 輸入路徑（必要）
+ *   --max-children <n>       當前 max_children 設定
+ *   --min-spare <n>          當前 min_spare_servers 設定
+ *   --config <path>          指定配置檔路徑
+ *   --json                   以 JSON 格式輸出
+ *   -h, --help               顯示說明
+ */
+
+require_once __DIR__ . '/../lib/bootstrap.php';
+
+// =============================================================================
+// 解析參數
+// =============================================================================
+
+$cliArgs = Config::fromCliArgs($argv);
+
+// 顯示說明
+if (isset($cliArgs['options']['help'])) {
+    echo <<<HELP
+PHP-FPM Analyzer - 分析監控數據並產生配置建議
+
+用法：
+  php bin/analyze --input <path> [選項]
+
+選項：
+  --input <path>             CSV 輸入路徑（必要）
+  --max-children <n>         當前 max_children 設定（用於 PES 計算）
+  --min-spare <n>            當前 min_spare_servers 設定
+  --config <path>            指定配置檔路徑
+  --json                     以 JSON 格式輸出
+  -h, --help                 顯示此說明
+
+範例：
+  # 基本分析
+  php bin/analyze --input /var/log/php-fpm/metrics.csv
+
+  # 指定當前配置進行評估
+  php bin/analyze --input metrics.csv --max-children 30 --min-spare 5
+
+  # JSON 輸出
+  php bin/analyze --input metrics.csv --json
+
+輸出說明：
+  PES (Parameter Efficiency Score)：0-1 分，越高越好
+  - 0.9+  優秀：配置最佳化
+  - 0.7+  良好：配置合理
+  - 0.5+  需改善：有改善空間
+  - <0.5  需緊急處理：配置問題嚴重
+
+HELP;
+    exit(0);
+}
+
+// =============================================================================
+// 載入配置
+// =============================================================================
+
+$config = Config::load($cliArgs['config_path']);
+$config = Config::merge($config, $cliArgs['overrides']);
+
+// 檢查必要參數
+$inputPath = isset($config['input']) ? $config['input'] : null;
+if (!$inputPath) {
+    fwrite(STDERR, "錯誤：請指定 --input 參數\n");
+    fwrite(STDERR, "使用 --help 查看說明\n");
+    exit(1);
+}
+
+// 建立當前配置陣列
+$currentConfig = [
+    'max_children' => isset($config['max_children']) ? (int) $config['max_children'] : 0,
+    'min_spare_servers' => isset($config['min_spare']) ? (int) $config['min_spare'] : 1,
+];
+
+// =============================================================================
+// 執行分析
+// =============================================================================
+
+$metrics = Analyzer::loadCsv($inputPath);
+if (empty($metrics)) {
+    fwrite(STDERR, "錯誤：無法載入數據或檔案為空\n");
+    exit(1);
+}
+
+$result = Analyzer::analyze($metrics, $currentConfig);
+
+if (isset($result['error']) && $result['error']) {
+    fwrite(STDERR, "錯誤：{$result['message']}\n");
+    exit(1);
+}
+
+// =============================================================================
+// 輸出結果
+// =============================================================================
+
+if (isset($cliArgs['options']['json'])) {
+    echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . "\n";
+    exit(0);
+}
+
+// 標準文字輸出
+$stats = $result['stats'];
+$pes = $result['pes'];
+$suggestions = $result['suggestions'];
+
+echo "# PHP-FPM 配置分析報告\n";
+echo "# ═══════════════════════════════════════════════════════════════\n";
+echo "\n";
+
+echo "## 數據概覽\n";
+echo "# ───────────────────────────────────────\n";
+echo "採樣數量: {$stats['sample_count']}\n";
+echo "時間範圍: {$stats['period_start']} ~ {$stats['period_end']}\n";
+echo "\n";
+
+echo "## 效能指標\n";
+echo "# ───────────────────────────────────────\n";
+printf("平均活躍 workers: %.1f (最高: %d, P95: %.1f)\n",
+    $stats['active_avg'], $stats['active_max'], $stats['active_p95']);
+printf("平均閒置 workers: %.1f (最低: %d)\n",
+    $stats['idle_avg'], $stats['idle_min']);
+printf("總 workers 最高: %d\n", $stats['total_max']);
+echo "\n";
+
+printf("佇列發生次數: %d (%.2f%%)\n",
+    $stats['queue_occurred_count'], $stats['queue_occurred_ratio'] * 100);
+printf("佇列最大深度: %d\n", $stats['queue_max']);
+printf("max_children 觸及次數: %d\n", $stats['max_children_reached']);
+echo "\n";
+
+printf("平均利用率: %.1f%%\n", $stats['utilization_avg'] * 100);
+printf("最高利用率: %.1f%%\n", $stats['utilization_max'] * 100);
+if ($stats['avg_worker_mb'] > 0) {
+    printf("Worker 平均記憶體: %.1f MB\n", $stats['avg_worker_mb']);
+}
+echo "\n";
+
+echo "## PES 評分\n";
+echo "# ───────────────────────────────────────\n";
+printf("總分: %.2f (%s)\n", $pes['pes_score'], $pes['rating']);
+echo "\n";
+echo "各項得分：\n";
+printf("  佇列控制 (40%%): %.2f\n", $pes['components']['queue_score']);
+printf("  利用率平衡 (30%%): %.2f\n", $pes['components']['utilization_score']);
+printf("  容量充足 (20%%): %.2f\n", $pes['components']['max_reach_score']);
+printf("  Spare 充足 (10%%): %.2f\n", $pes['components']['spare_score']);
+echo "\n";
+
+echo "## 調整建議\n";
+echo "# ───────────────────────────────────────\n";
+foreach ($suggestions as $suggestion) {
+    $priorityLabel = [
+        'high' => '⚠️  高優先',
+        'medium' => '📌 中優先',
+        'low' => '📝 低優先',
+        'info' => '✅ 資訊',
+    ];
+    $label = isset($priorityLabel[$suggestion['priority']]) ? $priorityLabel[$suggestion['priority']] : $suggestion['priority'];
+    echo "{$label}: {$suggestion['message']}\n";
+    echo "   建議: {$suggestion['action']}\n";
+    echo "\n";
+}

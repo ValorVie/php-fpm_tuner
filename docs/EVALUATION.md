@@ -107,7 +107,75 @@ pm.status_path = /fpm-status
 pm.status_listen = 127.0.0.1:9001
 ```
 
-### 3.2 收集指標腳本
+### 3.2 使用內建工具收集指標（推薦）
+
+PHP-FPM Tuner 提供內建的 PHP 收集工具，無需安裝 jq 或其他相依：
+
+```bash
+# 單次收集
+php bin/collect --once --output /var/log/php-fpm/metrics.csv
+
+# 持續收集（每 60 秒）
+php bin/collect --interval 60
+
+# 指定 PHP-FPM status URL
+php bin/collect --once --url "http://127.0.0.1:9001/fpm-status?json"
+
+# 使用 cron 每分鐘收集
+* * * * * /usr/bin/php /path/to/bin/collect --once
+```
+
+### 3.3 使用內建工具分析（推薦）
+
+```bash
+# 基本分析
+php bin/analyze --input /var/log/php-fpm/metrics.csv
+
+# 指定當前配置以取得更準確的評估
+php bin/analyze --input /var/log/php-fpm/metrics.csv --max-children 30 --min-spare 8
+
+# JSON 輸出（便於整合其他工具）
+php bin/analyze --input /var/log/php-fpm/metrics.csv --json
+```
+
+輸出範例：
+```
+# PHP-FPM 配置分析報告
+# ═══════════════════════════════════════════════════════════════
+
+## 數據概覽
+採樣數量: 60
+時間範圍: 2024-01-01 10:00:00 ~ 2024-01-01 11:00:00
+
+## 效能指標
+平均活躍 workers: 12.5 (最高: 28, P95: 24.0)
+平均閒置 workers: 8.2 (最低: 2)
+總 workers 最高: 30
+
+佇列發生次數: 3 (5.00%)
+佇列最大深度: 5
+max_children 觸及次數: 0
+
+平均利用率: 41.7%
+最高利用率: 93.3%
+
+## PES 評分
+總分: 0.85 (良好)
+
+各項得分：
+  佇列控制 (40%): 0.95
+  利用率平衡 (30%): 0.83
+  容量充足 (20%): 1.00
+  Spare 充足 (10%): 0.75
+
+## 調整建議
+✅ 資訊: 當前配置運作良好，無需調整
+   建議: 維持現有配置
+```
+
+### 3.4 手動收集指標腳本（備用）
+
+如果無法使用 PHP，可使用以下 bash 腳本：
 
 ```bash
 #!/bin/bash
@@ -139,7 +207,7 @@ TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
 echo "$TIMESTAMP,$ACTIVE,$IDLE,$TOTAL,$QUEUE,$MAX_REACHED,$MEMORY" >> "$OUTPUT_FILE"
 ```
 
-### 3.3 分析腳本
+### 3.5 手動分析腳本（備用）
 
 ```bash
 #!/bin/bash

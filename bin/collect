@@ -1,0 +1,117 @@
+#!/usr/bin/env php
+<?php
+
+/**
+ * PHP-FPM Collector - 監控指標收集入口
+ *
+ * 用法：
+ *   php bin/collect [選項]
+ *
+ * 選項：
+ *   --once                   單次收集後退出
+ *   --interval <seconds>     收集間隔（秒），預設 60
+ *   --output <path>          CSV 輸出路徑
+ *   --url <url>              PHP-FPM status URL
+ *   --config <path>          指定配置檔路徑
+ *   -h, --help               顯示說明
+ */
+
+require_once __DIR__ . '/../lib/bootstrap.php';
+
+// =============================================================================
+// 解析參數
+// =============================================================================
+
+$cliArgs = Config::fromCliArgs($argv);
+
+// 顯示說明
+if (isset($cliArgs['options']['help'])) {
+    echo <<<HELP
+PHP-FPM Collector - 從 PHP-FPM status 端點收集監控指標
+
+用法：
+  php bin/collect [選項]
+
+選項：
+  --once                     單次收集後退出
+  --interval <seconds>       收集間隔（秒），預設 60
+  --output <path>            CSV 輸出路徑，預設 /var/log/php-fpm/metrics.csv
+  --url <url>                PHP-FPM status URL，預設 http://127.0.0.1:9000/fpm-status?json
+  --config <path>            指定配置檔路徑
+  -h, --help                 顯示此說明
+
+前置需求：
+  1. 在 PHP-FPM pool 配置中啟用 status：
+     pm.status_path = /fpm-status
+
+  2. 確保 status 端點可透過 HTTP 存取
+
+範例：
+  # 單次收集
+  php bin/collect --once
+
+  # 持續收集（每 60 秒）
+  php bin/collect --interval 60
+
+  # 自訂輸出路徑
+  php bin/collect --once --output /tmp/metrics.csv
+
+  # 使用 cron 每分鐘收集
+  * * * * * /usr/bin/php /path/to/bin/collect --once
+
+HELP;
+    exit(0);
+}
+
+// =============================================================================
+// 載入配置
+// =============================================================================
+
+$config = Config::load($cliArgs['config_path']);
+$config = Config::merge($config, $cliArgs['overrides']);
+
+// 取得參數
+$once = isset($cliArgs['options']['once']);
+$interval = isset($config['interval']) ? (int) $config['interval'] : 60;
+$interval = isset($config['collect_interval']) ? (int) $config['collect_interval'] : $interval;
+$outputPath = isset($config['output']) ? $config['output'] : $config['metrics_output'];
+$statusUrl = isset($config['url']) ? $config['url'] : $config['fpm_status_url'];
+
+// =============================================================================
+// 收集迴圈
+// =============================================================================
+
+$errorCount = 0;
+$maxConsecutiveErrors = 5;
+
+while (true) {
+    $metrics = Collector::fetch($statusUrl);
+
+    if ($metrics === null) {
+        $errorCount++;
+        fwrite(STDERR, date('Y-m-d H:i:s') . " 錯誤：無法連接 PHP-FPM status 端點 {$statusUrl}\n");
+
+        if ($once) {
+            exit(1);
+        }
+
+        if ($errorCount >= $maxConsecutiveErrors) {
+            fwrite(STDERR, "連續 {$maxConsecutiveErrors} 次錯誤，請檢查 PHP-FPM 狀態\n");
+            $errorCount = 0;
+        }
+    } else {
+        $errorCount = 0;
+
+        if (Collector::appendToCsv($outputPath, $metrics)) {
+            if (!$once) {
+                echo date('Y-m-d H:i:s') . " 已收集：active={$metrics['active']}, idle={$metrics['idle']}, queue={$metrics['listen_queue']}\n";
+            }
+        }
+    }
+
+    if ($once) {
+        break;
+    }
+
+    sleep($interval);
+}
