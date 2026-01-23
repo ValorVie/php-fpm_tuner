@@ -12,6 +12,12 @@
  *   --interval <seconds>     收集間隔（秒），預設 60
  *   --output <path>          CSV 輸出路徑
  *   --url <url>              PHP-FPM status URL
+ *   --prune                  只執行數據清理，不收集
+ *   --stats                  顯示數據檔案統計
+ *   --retention <hours>      數據保留時間（小時）
+ *   --max-size <mb>          檔案大小上限（MB）
+ *   --max-rows <n>           數據筆數上限
+ *   --no-prune               停用自動清理
  *   --config <path>          指定配置檔路徑
  *   -h, --help               顯示說明
  */
@@ -40,6 +46,14 @@ PHP-FPM Collector - 從 PHP-FPM status 端點收集監控指標
   --config <path>            指定配置檔路徑
   -h, --help                 顯示此說明
 
+數據管理選項：
+  --prune                    只執行數據清理，不收集新數據
+  --stats                    顯示數據檔案統計資訊
+  --retention <hours>        數據保留時間（小時），預設 48
+  --max-size <mb>            檔案大小上限（MB），預設 50
+  --max-rows <n>             數據筆數上限，預設不限制
+  --no-prune                 停用自動清理
+
 前置需求：
   1. 在 PHP-FPM pool 配置中啟用 status：
      pm.status_path = /fpm-status
@@ -59,6 +73,15 @@ PHP-FPM Collector - 從 PHP-FPM status 端點收集監控指標
   # 使用 cron 每分鐘收集
   * * * * * /usr/bin/php /path/to/bin/collect --once
 
+  # 手動清理過期數據
+  php bin/collect --prune
+
+  # 查看數據統計
+  php bin/collect --stats
+
+  # 設定保留 7 天數據
+  php bin/collect --once --retention 168
+
 HELP;
     exit(0);
 }
@@ -72,10 +95,84 @@ $config = Config::merge($config, $cliArgs['overrides']);
 
 // 取得參數
 $once = isset($cliArgs['options']['once']);
+$pruneOnly = isset($cliArgs['overrides']['prune']) || in_array('--prune', $argv);
+$showStats = isset($cliArgs['overrides']['stats']) || in_array('--stats', $argv);
+$noPrune = isset($cliArgs['overrides']['no_prune']) || in_array('--no-prune', $argv);
+
 $interval = isset($config['interval']) ? (int) $config['interval'] : 60;
 $interval = isset($config['collect_interval']) ? (int) $config['collect_interval'] : $interval;
 $outputPath = isset($config['output']) ? $config['output'] : $config['metrics_output'];
 $statusUrl = isset($config['url']) ? $config['url'] : $config['fpm_status_url'];
+
+// 數據保留設定
+$retentionHours = isset($config['retention']) ? (int) $config['retention'] :
+    (isset($config['metrics_retention_hours']) ? (int) $config['metrics_retention_hours'] : 48);
+$maxSizeMb = isset($config['max_size']) ? (int) $config['max_size'] :
+    (isset($config['metrics_max_size_mb']) ? (int) $config['metrics_max_size_mb'] : 50);
+$maxRows = isset($config['max_rows']) ? (int) $config['max_rows'] :
+    (isset($config['metrics_max_rows']) ? (int) $config['metrics_max_rows'] : 0);
+
+$pruneConfig = [
+    'metrics_retention_hours' => $retentionHours,
+    'metrics_max_size_mb' => $maxSizeMb,
+    'metrics_max_rows' => $maxRows,
+];
+
+// =============================================================================
+// 顯示統計
+// =============================================================================
+
+if ($showStats) {
+    $stats = Collector::getFileStats($outputPath);
+
+    echo "# 數據檔案統計\n";
+    echo "# ─────────────────────────────────────\n";
+    echo "檔案路徑: {$outputPath}\n";
+
+    if (!$stats['exists']) {
+        echo "狀態: 檔案不存在\n";
+        exit(0);
+    }
+
+    echo "檔案大小: {$stats['size_mb']} MB ({$stats['size_bytes']} bytes)\n";
+    echo "記錄筆數: {$stats['row_count']}\n";
+    echo "最舊記錄: {$stats['oldest']}\n";
+    echo "最新記錄: {$stats['newest']}\n";
+    echo "\n";
+    echo "# 保留設定\n";
+    echo "# ─────────────────────────────────────\n";
+    echo "保留時間: {$retentionHours} 小時\n";
+    echo "大小上限: " . ($maxSizeMb > 0 ? "{$maxSizeMb} MB" : "不限制") . "\n";
+    echo "筆數上限: " . ($maxRows > 0 ? "{$maxRows}" : "不限制") . "\n";
+    exit(0);
+}
+
+// =============================================================================
+// 只執行清理
+// =============================================================================
+
+if ($pruneOnly) {
+    echo "清理數據檔案: {$outputPath}\n";
+
+    $beforeStats = Collector::getFileStats($outputPath);
+    if (!$beforeStats['exists']) {
+        echo "檔案不存在，無需清理\n";
+        exit(0);
+    }
+
+    echo "清理前: {$beforeStats['row_count']} 筆記錄, {$beforeStats['size_mb']} MB\n";
+
+    $result = Collector::pruneData($outputPath, $pruneConfig);
+
+    if ($result['removed'] > 0) {
+        echo "已清理: {$result['removed']} 筆過期記錄\n";
+        echo "剩餘: {$result['remaining']} 筆記錄\n";
+        echo "清理原因: {$result['action']}\n";
+    } else {
+        echo "無需清理，所有記錄都在保留期限內\n";
+    }
+    exit(0);
+}
 
 // =============================================================================
 // 收集迴圈
@@ -83,6 +180,8 @@ $statusUrl = isset($config['url']) ? $config['url'] : $config['fpm_status_url'];
 
 $errorCount = 0;
 $maxConsecutiveErrors = 5;
+$collectCount = 0;
+$pruneInterval = 100; // 每 100 次收集清理一次
 
 while (true) {
     $metrics = Collector::fetch($statusUrl);
@@ -103,8 +202,18 @@ while (true) {
         $errorCount = 0;
 
         if (Collector::appendToCsv($outputPath, $metrics)) {
+            $collectCount++;
+
             if (!$once) {
                 echo date('Y-m-d H:i:s') . " 已收集：active={$metrics['active']}, idle={$metrics['idle']}, queue={$metrics['listen_queue']}\n";
+            }
+
+            // 定期清理（持續模式）或單次收集時清理
+            if (!$noPrune && ($once || $collectCount % $pruneInterval === 0)) {
+                $pruneResult = Collector::pruneData($outputPath, $pruneConfig);
+                if ($pruneResult['removed'] > 0 && !$once) {
+                    echo date('Y-m-d H:i:s') . " 已清理 {$pruneResult['removed']} 筆過期記錄\n";
+                }
             }
         }
     }

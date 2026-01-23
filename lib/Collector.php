@@ -141,4 +141,178 @@ class Collector
         fclose($fp);
         return true;
     }
+
+    /**
+     * 清理過期數據
+     *
+     * @param string $path CSV 檔案路徑
+     * @param array $config 配置（retention_hours, max_size_mb, max_rows）
+     * @return array ['removed' => int, 'remaining' => int]
+     */
+    public static function pruneData($path, array $config)
+    {
+        $result = ['removed' => 0, 'remaining' => 0, 'action' => 'none'];
+
+        if (!file_exists($path)) {
+            return $result;
+        }
+
+        $retentionHours = isset($config['metrics_retention_hours']) ? (int) $config['metrics_retention_hours'] : 48;
+        $maxSizeMb = isset($config['metrics_max_size_mb']) ? (int) $config['metrics_max_size_mb'] : 0;
+        $maxRows = isset($config['metrics_max_rows']) ? (int) $config['metrics_max_rows'] : 0;
+
+        // 檢查是否需要清理
+        $needsPrune = false;
+        $currentSize = filesize($path);
+
+        // 大小限制檢查
+        if ($maxSizeMb > 0 && $currentSize > $maxSizeMb * 1024 * 1024) {
+            $needsPrune = true;
+            $result['action'] = 'size_limit';
+        }
+
+        // 時間或筆數限制需要讀取檔案才能確定
+        if (!$needsPrune && ($retentionHours > 0 || $maxRows > 0)) {
+            $needsPrune = true;
+        }
+
+        if (!$needsPrune) {
+            return $result;
+        }
+
+        // 讀取所有數據
+        $fp = fopen($path, 'r');
+        if (!$fp) {
+            return $result;
+        }
+
+        $headers = fgetcsv($fp);
+        if (!$headers) {
+            fclose($fp);
+            return $result;
+        }
+
+        $rows = [];
+        while (($row = fgetcsv($fp)) !== false) {
+            if (count($row) === count($headers)) {
+                $rows[] = $row;
+            }
+        }
+        fclose($fp);
+
+        $originalCount = count($rows);
+        $cutoffTime = $retentionHours > 0 ? strtotime("-{$retentionHours} hours") : 0;
+
+        // 根據時間過濾
+        if ($retentionHours > 0) {
+            $timestampIndex = array_search('timestamp', $headers);
+            if ($timestampIndex !== false) {
+                $rows = array_filter($rows, function ($row) use ($timestampIndex, $cutoffTime) {
+                    $rowTime = strtotime($row[$timestampIndex]);
+                    return $rowTime !== false && $rowTime >= $cutoffTime;
+                });
+                $rows = array_values($rows);
+                if (count($rows) < $originalCount) {
+                    $result['action'] = 'time_limit';
+                }
+            }
+        }
+
+        // 根據筆數限制
+        if ($maxRows > 0 && count($rows) > $maxRows) {
+            $rows = array_slice($rows, -$maxRows);
+            $result['action'] = 'row_limit';
+        }
+
+        // 根據大小限制（保留最新的 80%）
+        if ($maxSizeMb > 0 && count($rows) > 0) {
+            $estimatedRowSize = $currentSize / ($originalCount + 1);
+            $targetRows = (int) (($maxSizeMb * 1024 * 1024 * 0.8) / $estimatedRowSize);
+            if (count($rows) > $targetRows) {
+                $rows = array_slice($rows, -$targetRows);
+                $result['action'] = 'size_limit';
+            }
+        }
+
+        $result['removed'] = $originalCount - count($rows);
+        $result['remaining'] = count($rows);
+
+        // 如果沒有刪除任何記錄，不需要重寫檔案
+        if ($result['removed'] === 0) {
+            return $result;
+        }
+
+        // 重寫檔案
+        $fp = fopen($path, 'w');
+        if (!$fp) {
+            return $result;
+        }
+
+        fputcsv($fp, $headers);
+        foreach ($rows as $row) {
+            fputcsv($fp, $row);
+        }
+        fclose($fp);
+
+        return $result;
+    }
+
+    /**
+     * 取得 CSV 檔案統計資訊
+     *
+     * @param string $path CSV 檔案路徑
+     * @return array 統計資訊
+     */
+    public static function getFileStats($path)
+    {
+        $stats = [
+            'exists' => false,
+            'size_bytes' => 0,
+            'size_mb' => 0,
+            'row_count' => 0,
+            'oldest' => null,
+            'newest' => null,
+        ];
+
+        if (!file_exists($path)) {
+            return $stats;
+        }
+
+        $stats['exists'] = true;
+        $stats['size_bytes'] = filesize($path);
+        $stats['size_mb'] = round($stats['size_bytes'] / 1024 / 1024, 2);
+
+        $fp = fopen($path, 'r');
+        if (!$fp) {
+            return $stats;
+        }
+
+        $headers = fgetcsv($fp);
+        if (!$headers) {
+            fclose($fp);
+            return $stats;
+        }
+
+        $timestampIndex = array_search('timestamp', $headers);
+        $firstTimestamp = null;
+        $lastTimestamp = null;
+        $rowCount = 0;
+
+        while (($row = fgetcsv($fp)) !== false) {
+            $rowCount++;
+            if ($timestampIndex !== false && isset($row[$timestampIndex])) {
+                if ($firstTimestamp === null) {
+                    $firstTimestamp = $row[$timestampIndex];
+                }
+                $lastTimestamp = $row[$timestampIndex];
+            }
+        }
+        fclose($fp);
+
+        $stats['row_count'] = $rowCount;
+        $stats['oldest'] = $firstTimestamp;
+        $stats['newest'] = $lastTimestamp;
+
+        return $stats;
+    }
 }

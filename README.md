@@ -125,15 +125,64 @@ sudo systemctl reload php-fpm
 ```ini
 ; 啟用 status 端點
 pm.status_path = /fpm-status
-
-; 如果需要透過 TCP 存取（可選）
-pm.status_listen = 127.0.0.1:9001
 ```
 
 重載 PHP-FPM：
 
 ```bash
 sudo systemctl reload php-fpm
+```
+
+#### 透過 Nginx 存取 Status（推薦）
+
+建立專用的 Nginx 配置（如 `/etc/nginx/conf.d/fpm-status.local.conf`）：
+
+```nginx
+# 只綁定 127.0.0.1:8001，外部完全無法連線
+server {
+    listen 127.0.0.1:8001;
+    server_name localhost;
+
+    # 僅允許本機存取
+    location = /fpm-status {
+        include fastcgi_params;
+        # 與你的 PHP-FPM listen 一致
+        fastcgi_pass 127.0.0.1:9000;
+
+        fastcgi_param SCRIPT_FILENAME /fpm-status;
+        fastcgi_param SCRIPT_NAME     /fpm-status;
+
+        # 雙重限制
+        allow 127.0.0.1;
+        deny  all;
+    }
+
+    # 其餘一律拒絕
+    location / {
+        return 403;
+    }
+
+    access_log /var/log/nginx/fpm-status.local.access.log;
+    error_log  /var/log/nginx/fpm-status.local.error.log;
+}
+```
+
+測試並重載 Nginx：
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+驗證 status 端點：
+
+```bash
+curl "http://127.0.0.1:8001/fpm-status?json"
+```
+
+收集時使用對應的 URL：
+
+```bash
+php bin/collect --once --url "http://127.0.0.1:8001/fpm-status?json"
 ```
 
 ### Step 3: 設定監控收集
@@ -251,6 +300,14 @@ php bin/collect [選項]
   --output <path>            CSV 輸出路徑
   --url <url>                PHP-FPM status URL
   -h, --help                 顯示說明
+
+數據管理選項：
+  --prune                    只執行數據清理，不收集
+  --stats                    顯示數據檔案統計
+  --retention <hours>        數據保留時間（小時），預設 48
+  --max-size <mb>            檔案大小上限（MB），預設 50
+  --max-rows <n>             數據筆數上限
+  --no-prune                 停用自動清理
 ```
 
 ### bin/analyze
@@ -283,6 +340,90 @@ php bin/tuner --config /path/to/config.php
 ```
 
 配置檔範例請參考 `config/default.php`。
+
+## 數據保留與清理
+
+監控數據預設保留 **48 小時**，超過時間或大小限制的舊數據會自動清除。
+
+### 預設設定
+
+| 設定 | 預設值 | 說明 |
+|------|--------|------|
+| `metrics_retention_hours` | 48 | 數據保留時間（小時） |
+| `metrics_max_size_mb` | 50 | CSV 檔案大小上限（MB） |
+| `metrics_max_rows` | 0 | 數據筆數上限（0=不限制） |
+
+### 查看數據統計
+
+```bash
+php bin/collect --stats
+```
+
+輸出範例：
+```
+# 數據檔案統計
+# ─────────────────────────────────────
+檔案路徑: /var/log/php-fpm/metrics.csv
+檔案大小: 2.35 MB (2463744 bytes)
+記錄筆數: 2880
+最舊記錄: 2024-01-01 00:00:00
+最新記錄: 2024-01-02 23:59:00
+
+# 保留設定
+# ─────────────────────────────────────
+保留時間: 48 小時
+大小上限: 50 MB
+筆數上限: 不限制
+```
+
+### 手動清理
+
+```bash
+# 執行清理（使用預設設定）
+php bin/collect --prune
+
+# 清理超過 24 小時的數據
+php bin/collect --prune --retention 24
+
+# 限制檔案大小為 10 MB
+php bin/collect --prune --max-size 10
+```
+
+### 調整保留設定
+
+**方法 A：透過 CLI 參數**
+
+```bash
+# 保留 7 天數據
+php bin/collect --once --retention 168
+
+# 限制檔案大小為 100 MB
+php bin/collect --once --max-size 100
+
+# 停用自動清理
+php bin/collect --once --no-prune
+```
+
+**方法 B：透過配置檔**
+
+編輯 `config/default.php` 或建立自訂配置檔：
+
+```php
+return [
+    // ... 其他設定 ...
+
+    // 數據保留設定
+    'metrics_retention_hours' => 168,  // 保留 7 天
+    'metrics_max_size_mb' => 100,      // 100 MB 上限
+    'metrics_max_rows' => 10080,       // 最多 10080 筆（7天 × 24小時 × 60分鐘）
+];
+```
+
+### 清理時機
+
+- **單次收集模式**（`--once`）：每次收集後檢查並清理
+- **持續收集模式**：每 100 次收集後檢查並清理
+- **手動清理**：使用 `--prune` 參數
 
 ## 文件
 
