@@ -20,7 +20,7 @@ return [
      * - 0.20 (20%)：生產環境保守配置
      * - 0.30 (30%)：與其他重要服務共存時
      */
-    'memory_reserve_ratio' => 0.10,
+    'memory_reserve_ratio' => 0.25,
 
     /**
      * Worker 記憶體最小值 (MB)
