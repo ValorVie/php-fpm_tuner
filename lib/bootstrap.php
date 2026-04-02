@@ -59,5 +59,8 @@ if (!function_exists('ini_parse_quantity')) {
 require_once __DIR__ . '/Config.php';
 require_once __DIR__ . '/SystemInfo.php';
 require_once __DIR__ . '/Calculator.php';
+require_once __DIR__ . '/FcgiClient.php';
 require_once __DIR__ . '/Collector.php';
 require_once __DIR__ . '/Analyzer.php';
+require_once __DIR__ . '/Evaluator.php';
+require_once __DIR__ . '/Optimizer.php';

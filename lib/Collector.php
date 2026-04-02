@@ -28,10 +28,44 @@ class Collector
     /**
      * 從 PHP-FPM status 端點取得指標
      *
-     * @param string $statusUrl PHP-FPM status URL（需帶 ?json）
+     * 支援三種連線方式：
+     * - Unix socket 路徑（如 /var/run/php-fpm.sock）
+     * - TCP 地址（如 127.0.0.1:9000）
+     * - HTTP URL（如 http://127.0.0.1:9000/fpm-status?json）
+     *
+     * @param string $statusUrl 連線地址
+     * @param string $statusPath status 端點路徑（FCGI 模式用）
      * @return array|null 指標陣列或 null（失敗時）
      */
-    public static function fetch($statusUrl)
+    public static function fetch($statusUrl, $statusPath = '/fpm-status')
+    {
+        // 判斷連線方式
+        if (strpos($statusUrl, '/') === 0 || strpos($statusUrl, 'unix:') === 0) {
+            // Unix socket → FCGI
+            $address = preg_replace('~^unix://+~', '/', $statusUrl);
+            $data = FcgiClient::getStatus($address, $statusPath);
+        } elseif (preg_match('~^\d+\.\d+\.\d+\.\d+:\d+$~', $statusUrl)) {
+            // TCP 地址 → FCGI
+            $data = FcgiClient::getStatus($statusUrl, $statusPath);
+        } else {
+            // HTTP URL → 現有邏輯
+            $data = self::fetchHttp($statusUrl);
+        }
+
+        if (!is_array($data)) {
+            return null;
+        }
+
+        return self::formatMetrics($data);
+    }
+
+    /**
+     * 透過 HTTP 取得 PHP-FPM status
+     *
+     * @param string $url HTTP URL
+     * @return array|null
+     */
+    private static function fetchHttp($url)
     {
         $context = stream_context_create([
             'http' => [
@@ -40,17 +74,23 @@ class Collector
             ],
         ]);
 
-        $response = @file_get_contents($statusUrl, false, $context);
+        $response = @file_get_contents($url, false, $context);
         if ($response === false) {
             return null;
         }
 
         $data = json_decode($response, true);
-        if (!is_array($data)) {
-            return null;
-        }
+        return is_array($data) ? $data : null;
+    }
 
-        // 取得 worker 記憶體統計
+    /**
+     * 將原始 status 資料格式化為指標陣列
+     *
+     * @param array $data PHP-FPM status JSON
+     * @return array
+     */
+    private static function formatMetrics(array $data)
+    {
         $memoryStats = self::getWorkerMemoryStats();
 
         return [
@@ -82,7 +122,7 @@ class Collector
             return $result;
         }
 
-        $psOutput = shell_exec('ps -eo size,command 2>/dev/null');
+        $psOutput = shell_exec('ps -eo rss,command 2>/dev/null');
         if (!$psOutput) {
             return $result;
         }

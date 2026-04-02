@@ -17,8 +17,9 @@ class Calculator
     public static function calculate(array $systemInfo, array $config)
     {
         $cpuCores = $systemInfo['cpu_cores'];
-        $freeMemory = $systemInfo['free_memory'];
         $workerMemory = $systemInfo['worker_memory'];
+
+        $baseMemory = self::resolveBaseMemory($systemInfo, $config);
 
         // 取得配置值（使用預設值作為後備）
         $memoryReserveRatio = isset($config['memory_reserve_ratio']) ? $config['memory_reserve_ratio'] : 0.20;
@@ -33,8 +34,8 @@ class Calculator
         $requestSlowlogTimeout = isset($config['request_slowlog_timeout']) ? $config['request_slowlog_timeout'] : 5;
 
         // 計算 max_children
-        $memoryReserve = round($memoryReserveRatio * $freeMemory);
-        $maxChildren = floor(($freeMemory - $memoryReserve) / $workerMemory);
+        $memoryReserve = round($memoryReserveRatio * $baseMemory);
+        $maxChildren = floor(($baseMemory - $memoryReserve) / $workerMemory);
 
         // 記憶體不足處理
         if ($maxChildren < 1) {
@@ -42,7 +43,7 @@ class Calculator
                 'error' => true,
                 'message' => '可用記憶體不足，無法啟動 PHP-FPM worker',
                 'details' => [
-                    'free_memory' => $freeMemory,
+                    'base_memory' => $baseMemory,
                     'worker_memory' => $workerMemory,
                     'memory_reserve_ratio' => $memoryReserveRatio,
                 ],
@@ -79,6 +80,22 @@ class Calculator
         $params['memory_reserve_ratio'] = $memoryReserveRatio;
 
         return $params;
+    }
+
+    /**
+     * 根據 memory_mode 決定使用總記憶體或可用記憶體
+     *
+     * @param array $systemInfo SystemInfo::collect() 的回傳值
+     * @param array $config 配置陣列
+     * @return int 基礎記憶體 (MB)
+     */
+    public static function resolveBaseMemory(array $systemInfo, array $config)
+    {
+        $memoryMode = isset($config['memory_mode']) ? $config['memory_mode'] : 'total';
+        if ($memoryMode === 'total' && isset($systemInfo['total_memory']) && $systemInfo['total_memory'] > 0) {
+            return $systemInfo['total_memory'];
+        }
+        return isset($systemInfo['free_memory']) ? $systemInfo['free_memory'] : 0;
     }
 
     /**

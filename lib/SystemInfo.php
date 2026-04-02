@@ -19,6 +19,7 @@ class SystemInfo
 
         return [
             'cpu_cores' => self::getCpuCores(),
+            'total_memory' => self::getTotalMemory(),
             'free_memory' => self::getFreeMemory(),
             'worker_memory' => self::getWorkerMemory($minWorkerMemory),
         ];
@@ -97,6 +98,33 @@ class SystemInfo
     }
 
     /**
+     * 取得系統總記憶體 (MB)
+     *
+     * @return int
+     */
+    public static function getTotalMemory()
+    {
+        if (PHP_OS_FAMILY === 'Windows') {
+            $output = shell_exec('wmic ComputerSystem get TotalPhysicalMemory 2>nul');
+            if ($output && preg_match('~(\d{6,})~', $output, $matches)) {
+                return (int) round((float) $matches[1] / 1024 / 1024);
+            }
+        } elseif (PHP_OS_FAMILY === 'Darwin') {
+            $bytes = shell_exec('sysctl -n hw.memsize');
+            if ($bytes) {
+                return (int) round((float) trim($bytes) / 1024 / 1024);
+            }
+        } else {
+            $line = shell_exec('grep MemTotal /proc/meminfo 2>/dev/null');
+            if ($line && preg_match('~MemTotal:\s+(\d+)\s+~', $line, $matches)) {
+                return (int) round((int) $matches[1] / 1024);
+            }
+        }
+
+        return 0;
+    }
+
+    /**
      * 取得 PHP-FPM worker 平均記憶體使用量 (MB)
      *
      * @param int $minMemory 最小記憶體值
@@ -107,7 +135,7 @@ class SystemInfo
         $processMemory = 0;
 
         if (PHP_OS_FAMILY !== 'Windows') {
-            $psOutput = shell_exec('ps -eo size,command 2>/dev/null');
+            $psOutput = shell_exec('ps -eo rss,command 2>/dev/null');
             if ($psOutput && preg_match_all('~(\d+).*php-fpm: pool~', $psOutput, $matches, PREG_PATTERN_ORDER)) {
                 if (count($matches[1]) > 0) {
                     $processMemory = round(array_sum($matches[1]) / count($matches[1]) / 1024);

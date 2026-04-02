@@ -120,8 +120,11 @@ if (isset($cliArgs['options']['json'])) {
     echo "# ─────────────────────────────────────\n";
     echo "# 系統資訊:\n";
     echo "#   CPU 核心數: {$systemInfo['cpu_cores']}\n";
+    echo "#   總記憶體: {$systemInfo['total_memory']} MB\n";
     echo "#   可用記憶體: {$systemInfo['free_memory']} MB\n";
-    echo "#   Worker 記憶體: {$systemInfo['worker_memory']} MB\n";
+    echo "#   Worker 記憶體: {$systemInfo['worker_memory']} MB (RSS)\n";
+    $memMode = isset($config['memory_mode']) ? $config['memory_mode'] : 'total';
+    echo "#   計算模式: {$memMode}\n";
     echo "#   記憶體保留: {$reservePercent}%\n";
     echo "# ─────────────────────────────────────\n";
     echo "\n";

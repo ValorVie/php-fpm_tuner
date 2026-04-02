@@ -184,7 +184,8 @@ $collectCount = 0;
 $pruneInterval = 100; // 每 100 次收集清理一次
 
 while (true) {
-    $metrics = Collector::fetch($statusUrl);
+    $statusPath = isset($config['fpm_status_path']) ? $config['fpm_status_path'] : '/fpm-status';
+    $metrics = Collector::fetch($statusUrl, $statusPath);
 
     if ($metrics === null) {
         $errorCount++;

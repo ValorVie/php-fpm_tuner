@@ -99,10 +99,17 @@ if (empty($metrics)) {
     exit(1);
 }
 
-$result = Analyzer::analyze($metrics, $currentConfig);
+$stats = Analyzer::calculateStats($metrics);
+if (isset($stats['error']) && $stats['error']) {
+    fwrite(STDERR, "錯誤：{$stats['message']}\n");
+    exit(1);
+}
 
-if (isset($result['error']) && $result['error']) {
-    fwrite(STDERR, "錯誤：{$result['message']}\n");
+$timeSeries = Analyzer::analyzeTimeSeries($metrics);
+$evaluation = Evaluator::evaluate($stats, $timeSeries, $currentConfig);
+
+if (isset($evaluation['error']) && $evaluation['error']) {
+    fwrite(STDERR, "錯誤：{$evaluation['message']}\n");
     exit(1);
 }
 
@@ -111,14 +118,19 @@ if (isset($result['error']) && $result['error']) {
 // =============================================================================
 
 if (isset($cliArgs['options']['json'])) {
-    echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . "\n";
+    $output = [
+        'stats' => $stats,
+        'time_series' => $timeSeries,
+        'evaluation' => $evaluation,
+    ];
+    echo json_encode($output, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . "\n";
     exit(0);
 }
 
 // 標準文字輸出
-$stats = $result['stats'];
-$pes = $result['pes'];
-$suggestions = $result['suggestions'];
+$pes = $evaluation['pes'];
+$diagnostics = $evaluation['diagnostics'];
+$insights = $evaluation['insights'];
 
 echo "# PHP-FPM 配置分析報告\n";
 echo "# ═══════════════════════════════════════════════════════════════\n";
@@ -128,6 +140,13 @@ echo "## 數據概覽\n";
 echo "# ───────────────────────────────────────\n";
 echo "採樣數量: {$stats['sample_count']}\n";
 echo "時間範圍: {$stats['period_start']} ~ {$stats['period_end']}\n";
+$dq = $timeSeries['data_quality'];
+if ($dq['gap_count'] > 0) {
+    echo "資料缺口: {$dq['gap_count']}\n";
+}
+if ($stats['fpm_restarts'] > 0) {
+    echo "FPM 重啟: {$stats['fpm_restarts']} 次\n";
+}
 echo "\n";
 
 echo "## 效能指標\n";
@@ -142,38 +161,64 @@ echo "\n";
 printf("佇列發生次數: %d (%.2f%%)\n",
     $stats['queue_occurred_count'], $stats['queue_occurred_ratio'] * 100);
 printf("佇列最大深度: %d\n", $stats['queue_max']);
-printf("max_children 觸及次數: %d\n", $stats['max_children_reached']);
+printf("max_children 觸及次數: %d（觀測期間事件數）\n", $stats['max_children_events']);
 echo "\n";
 
 printf("平均利用率: %.1f%%\n", $stats['utilization_avg'] * 100);
 printf("最高利用率: %.1f%%\n", $stats['utilization_max'] * 100);
 if ($stats['avg_worker_mb'] > 0) {
-    printf("Worker 平均記憶體: %.1f MB\n", $stats['avg_worker_mb']);
+    printf("Worker 平均記憶體: %.1f MB (RSS)\n", $stats['avg_worker_mb']);
 }
 echo "\n";
+
+// 峰值分析
+if (!empty($timeSeries['peak_hours'])) {
+    echo "## 峰值分析\n";
+    echo "# ───────────────────────────────────────\n";
+    echo "峰值時段: " . implode(', ', array_map(function ($h) { return $h . ':00'; }, $timeSeries['peak_hours'])) . "\n";
+    $ps = $timeSeries['peak_stats'];
+    if ($ps && !isset($ps['error'])) {
+        printf("峰值利用率: %.1f%% (平均 active: %.1f)\n", $ps['utilization_avg'] * 100, $ps['active_avg']);
+    }
+    $trend = $timeSeries['trend'];
+    if ($trend['direction'] !== 'stable') {
+        printf("趨勢: %s (斜率: %.2f/hr, 信心度: %.0f%%)\n",
+            $trend['direction'] === 'increasing' ? '上升' : '下降',
+            $trend['slope'], $trend['confidence'] * 100);
+    }
+    echo "\n";
+}
 
 echo "## PES 評分\n";
 echo "# ───────────────────────────────────────\n";
 printf("總分: %.2f (%s)\n", $pes['pes_score'], $pes['rating']);
 echo "\n";
 echo "各項得分：\n";
-printf("  佇列控制 (40%%): %.2f\n", $pes['components']['queue_score']);
+printf("  佇列控制 (35%%): %.2f\n", $pes['components']['queue_score']);
 printf("  利用率平衡 (30%%): %.2f\n", $pes['components']['utilization_score']);
-printf("  容量充足 (20%%): %.2f\n", $pes['components']['max_reach_score']);
+printf("  容量充足 (25%%): %.2f\n", $pes['components']['capacity_score']);
 printf("  Spare 充足 (10%%): %.2f\n", $pes['components']['spare_score']);
 echo "\n";
 
-echo "## 調整建議\n";
+echo "## 診斷\n";
 echo "# ───────────────────────────────────────\n";
-foreach ($suggestions as $suggestion) {
-    $priorityLabel = [
-        'high' => '⚠️  高優先',
-        'medium' => '📌 中優先',
-        'low' => '📝 低優先',
-        'info' => '✅ 資訊',
-    ];
-    $label = isset($priorityLabel[$suggestion['priority']]) ? $priorityLabel[$suggestion['priority']] : $suggestion['priority'];
-    echo "{$label}: {$suggestion['message']}\n";
-    echo "   建議: {$suggestion['action']}\n";
-    echo "\n";
+$priorityLabel = [
+    'high' => '!!  高優先',
+    'medium' => '!   中優先',
+    'low' => '-   低優先',
+    'info' => '    資訊',
+];
+foreach ($diagnostics as $diag) {
+    $label = isset($priorityLabel[$diag['priority']]) ? $priorityLabel[$diag['priority']] : $diag['priority'];
+    echo "{$label}: {$diag['message']}\n";
 }
+
+if (!empty($insights)) {
+    echo "\n";
+    foreach ($insights as $insight) {
+        $label = isset($priorityLabel[$insight['priority']]) ? $priorityLabel[$insight['priority']] : $insight['priority'];
+        echo "{$label}: {$insight['message']}\n";
+    }
+}
+echo "\n";
+echo "執行 php bin/optimize --input <path> 取得具體設定建議\n";

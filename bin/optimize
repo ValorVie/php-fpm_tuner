@@ -1,0 +1,194 @@
+#!/usr/bin/env php
+<?php
+
+/**
+ * PHP-FPM Optimizer - 資料驅動的設定優化入口
+ *
+ * 用法：
+ *   php bin/optimize --input <path> [選項]
+ */
+
+require_once __DIR__ . '/../lib/bootstrap.php';
+
+// =============================================================================
+// 解析參數
+// =============================================================================
+
+$cliArgs = Config::fromCliArgs($argv);
+
+if (isset($cliArgs['options']['help'])) {
+    echo <<<HELP
+PHP-FPM Optimizer - 根據監控數據產生具體設定建議
+
+用法：
+  php bin/optimize --input <path> [選項]
+
+選項：
+  --input <path>             CSV 輸入路徑（必要）
+  --max-children <n>         當前 max_children 設定
+  --min-spare <n>            當前 min_spare_servers 設定
+  --max-spare <n>            當前 max_spare_servers 設定
+  --start-servers <n>        當前 start_servers 設定
+  --config <path>            指定配置檔路徑
+  --json                     以 JSON 格式輸出
+  --aggressive               使用目標值而非漸進值
+  -h, --help                 顯示此說明
+
+範例：
+  # 基本優化（需指定當前配置以取得精確建議）
+  php bin/optimize --input metrics.csv --max-children 30 --min-spare 5
+
+  # JSON 輸出
+  php bin/optimize --input metrics.csv --json
+
+HELP;
+    exit(0);
+}
+
+// =============================================================================
+// 載入配置
+// =============================================================================
+
+$config = Config::load($cliArgs['config_path']);
+$config = Config::merge($config, $cliArgs['overrides']);
+
+$inputPath = isset($config['input']) ? $config['input'] : null;
+if (!$inputPath) {
+    fwrite(STDERR, "錯誤：請指定 --input 參數\n");
+    fwrite(STDERR, "使用 --help 查看說明\n");
+    exit(1);
+}
+
+$realInputPath = realpath($inputPath);
+if ($realInputPath === false) {
+    fwrite(STDERR, "錯誤：找不到檔案 {$inputPath}\n");
+    exit(1);
+}
+$inputPath = $realInputPath;
+
+$aggressive = isset($cliArgs['options']['aggressive']);
+
+$currentConfig = [
+    'max_children' => isset($config['max_children']) ? (int) $config['max_children'] : 0,
+    'start_servers' => isset($config['start_servers']) ? (int) $config['start_servers'] : 0,
+    'min_spare_servers' => isset($config['min_spare']) ? (int) $config['min_spare'] : 1,
+    'max_spare_servers' => isset($config['max_spare']) ? (int) $config['max_spare'] : 0,
+    'memory_reserve_ratio' => isset($config['memory_reserve_ratio']) ? $config['memory_reserve_ratio'] : 0.20,
+    'memory_mode' => isset($config['memory_mode']) ? $config['memory_mode'] : 'total',
+];
+
+// =============================================================================
+// 執行分析 → 評估 → 優化
+// =============================================================================
+
+$metrics = Analyzer::loadCsv($inputPath);
+if (empty($metrics)) {
+    fwrite(STDERR, "錯誤：無法載入數據或檔案為空\n");
+    exit(1);
+}
+
+$stats = Analyzer::calculateStats($metrics);
+if (isset($stats['error']) && $stats['error']) {
+    fwrite(STDERR, "錯誤：{$stats['message']}\n");
+    exit(1);
+}
+
+$timeSeries = Analyzer::analyzeTimeSeries($metrics);
+$evaluation = Evaluator::evaluate($stats, $timeSeries, $currentConfig);
+$systemInfo = SystemInfo::collect($config);
+$result = Optimizer::optimize($stats, $timeSeries, $systemInfo, $currentConfig);
+
+if (isset($result['error']) && $result['error']) {
+    fwrite(STDERR, "錯誤：{$result['message']}\n");
+    exit(1);
+}
+
+// =============================================================================
+// 輸出結果
+// =============================================================================
+
+if (isset($cliArgs['options']['json'])) {
+    $output = [
+        'stats' => $stats,
+        'evaluation' => $evaluation,
+        'optimization' => $result,
+    ];
+    echo json_encode($output, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . "\n";
+    exit(0);
+}
+
+// 標準文字輸出
+$pes = $evaluation['pes'];
+$values = $aggressive ? $result['target'] : $result['recommended'];
+
+echo "# PHP-FPM 優化建議\n";
+echo "# ═══════════════════════════════════════════════════════════════\n";
+echo "\n";
+
+echo "## 資料摘要\n";
+echo "# ───────────────────────────────────────\n";
+$dq = $timeSeries['data_quality'];
+printf("採樣數量: %d | 時間範圍: %s ~ %s\n", $stats['sample_count'], $stats['period_start'], $stats['period_end']);
+printf("信心度: %s | 資料缺口: %d\n", $result['confidence'], $dq['gap_count']);
+echo "\n";
+
+echo "## PES 評分\n";
+echo "# ───────────────────────────────────────\n";
+printf("當前: %.2f (%s)\n", $pes['pes_score'], $pes['rating']);
+echo "\n";
+
+echo "## 建議配置\n";
+echo "# ───────────────────────────────────────\n";
+printf("%-25s %-8s %-8s %-8s %s\n", '', '當前', '建議', '目標', '原因');
+echo str_repeat('-', 80) . "\n";
+
+$paramNames = ['max_children', 'start_servers', 'min_spare_servers', 'max_spare_servers'];
+foreach ($paramNames as $param) {
+    $cur = $result['current'][$param];
+    $rec = $values[$param];
+    $tgt = $result['target'][$param];
+    $reason = '';
+    foreach ($result['changes'] as $change) {
+        if ($change['param'] === $param) {
+            $reason = $change['reason'];
+            break;
+        }
+    }
+    $marker = $cur !== $rec ? '*' : ' ';
+    printf("%s %-24s %-8d %-8d %-8d %s\n", $marker, $param, $cur, $rec, $tgt, $reason);
+}
+echo "\n";
+
+echo "## 限制條件\n";
+echo "# ───────────────────────────────────────\n";
+$c = $result['constraints'];
+printf("記憶體上限: %d workers (%dMB %s, %dMB/worker, %.0f%% reserve)\n",
+    $c['memory_limit'], $c['base_memory_mb'],
+    isset($currentConfig['memory_mode']) && $currentConfig['memory_mode'] === 'available' ? 'available' : 'total',
+    $c['worker_memory_mb'], $c['memory_reserve_ratio'] * 100);
+printf("CPU 限制: %d workers (%d cores × 8)\n", $c['cpu_limit'], $systemInfo['cpu_cores']);
+printf("生效限制: %s\n", $c['applied_limit']);
+echo "\n";
+
+echo "## 下一步\n";
+echo "# ───────────────────────────────────────\n";
+if (empty($result['changes'])) {
+    echo "當前配置已接近最佳，無需調整\n";
+} else {
+    echo "1. 套用建議值到 PHP-FPM pool 配置\n";
+    echo "2. 執行 systemctl reload php-fpm\n";
+    echo "3. 觀察 24 小時\n";
+    echo "4. 再次執行 php bin/optimize 確認效果\n";
+}
+echo "\n";
+
+// 診斷摘要
+if (!empty($evaluation['diagnostics'])) {
+    echo "## 診斷\n";
+    echo "# ───────────────────────────────────────\n";
+    $icons = ['high' => '!!', 'medium' => '! ', 'low' => '- ', 'info' => '  '];
+    foreach ($evaluation['diagnostics'] as $diag) {
+        $icon = isset($icons[$diag['priority']]) ? $icons[$diag['priority']] : '  ';
+        echo "{$icon} {$diag['message']}\n";
+    }
+}

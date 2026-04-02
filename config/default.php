@@ -13,6 +13,14 @@ return [
     // =========================================================================
 
     /**
+     * 記憶體計算模式
+     *
+     * - 'total'：使用系統總記憶體（推薦，結果穩定可重現）
+     * - 'available'：使用當前可用記憶體（舊行為，結果隨系統狀態波動）
+     */
+    'memory_mode' => 'total',
+
+    /**
      * 記憶體保留比例
      *
      * 保留給系統和其他服務（nginx、MySQL 等）的記憶體比例
@@ -99,6 +107,13 @@ return [
      * pm.status_path = /fpm-status
      */
     'fpm_status_url' => 'http://127.0.0.1:9000/fpm-status?json',
+
+    /**
+     * PHP-FPM status 路徑（FCGI 模式用）
+     *
+     * 透過 Unix socket 或 TCP 直連 PHP-FPM 時需要此設定
+     */
+    'fpm_status_path' => '/fpm-status',
 
     /**
      * 監控指標輸出路徑

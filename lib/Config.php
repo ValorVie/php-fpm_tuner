@@ -117,6 +117,12 @@ class Config
                 continue;
             }
 
+            if ($arg === '--aggressive') {
+                $result['options']['aggressive'] = true;
+                $i++;
+                continue;
+            }
+
             if (strpos($arg, '--') === 0 && isset($argv[$i + 1])) {
                 $key = substr($arg, 2);
                 $key = str_replace('-', '_', $key);
