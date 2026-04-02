@@ -79,11 +79,14 @@ pm.status_path = /fpm-status
 # 單次收集（搭配 cron 使用）
 php bin/collect --once
 
+# 指定 status URL 和輸出路徑
+php bin/collect --once --url "http://127.0.0.1:8001/fpm-status?json" --output /var/log/php-fpm/metrics.csv
+
 # 持續收集（每 60 秒）
 php bin/collect --interval 60
 
-# 使用 cron 每分鐘收集
-* * * * * /usr/bin/php /path/to/bin/collect --once
+# 使用 cron 每分鐘收集（指定完整路徑）
+* * * * * /usr/bin/php /opt/php-fpm_tuner/bin/collect --once --url "http://127.0.0.1:8001/fpm-status?json" --output /var/log/php-fpm/metrics.csv
 ```
 
 建議收集至少 **24 小時** 數據以涵蓋峰值和離峰時段。
