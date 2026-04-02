@@ -4,12 +4,16 @@
 id: spec-driven-development
 meta:
   version: "1.2.0"
-  updated: "2026-01-05"
-  source: core/spec-driven-development.md
-  description: Principles and workflows for Spec-Driven Development (SDD)
+  updated: "2025-12-30"
+  source: methodologies/guides/sdd-guide.md
+  description: Spec-Driven Development workflow where documentation precedes implementation
 
 workflow:
   stages:
+    - stage: Discuss
+      description: Capture gray areas, lock scope, establish canonical refs
+      artifacts: read_first list, scope definition, gray area log
+
     - stage: Proposal
       description: Define what to change and why
       artifacts: proposal.md
@@ -41,7 +45,7 @@ principles:
 
   methodology_over_tooling:
     rule: SDD is a methodology, not bound to a single tool
-    universal_flow: Proposal -> Review -> Implementation -> Verification -> Archive
+    universal_flow: Discuss -> Proposal -> Review -> Implementation -> Verification -> Archive
 
   spec_first:
     rule: No functional code changes without approved specification

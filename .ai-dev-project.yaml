@@ -1,0 +1,50 @@
+managed_by: ai-dev
+schema_version: '2'
+template:
+  name: project-template
+  url: local://project-template
+  branch: main
+projection:
+  targets:
+  - claude
+  - codex
+  - gemini
+  profile: default
+  allow_local_generation: true
+managed_files:
+- .agent
+- .agents
+- .claude
+- .codex
+- .gemini
+- .github/copilot-instructions.md
+- .github/prompts
+- .github/skills
+- .opencode
+- AGENTS.md
+- CLAUDE.md
+- GEMINI.md
+- INSTRUCTIONS.md
+project_id: php-fpm-tuner
+git_exclude:
+  enabled: false
+  version: '1'
+  patterns:
+  - .agent/
+  - .agents/
+  - .ai-dev-project.yaml
+  - .claude/
+  - .codex/
+  - .gemini/
+  - .github/copilot-instructions.md
+  - .github/prompts/
+  - .github/skills/
+  - .opencode/
+  - AGENTS.md
+  - CLAUDE.md
+  - GEMINI.md
+  - INSTRUCTIONS.md
+  keep_tracked:
+  - .editorconfig
+  - .gitattributes
+  - .gitignore

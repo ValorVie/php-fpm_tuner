@@ -6,7 +6,8 @@ meta:
   version: "2.0.0"
   updated: "2026-01-21"
   source: core/refactoring-standards.md
-  description: Comprehensive refactoring guidelines with tactical, strategic, and safety strategies
+  guide: core/guides/refactoring-guide.md
+  description: Refactoring guidelines with tactical, strategic, and safety strategies including decision matrix
 
 # Refactor vs Rewrite Decision Matrix
 decision_matrix:
@@ -223,7 +224,8 @@ safety_strategies:
     - technique: Wrap Class
       when: Need to decorate existing class
       how: Decorator Pattern
-    principle: New code uses TDD; legacy untouched until tested
+      
+  principle: New code uses TDD; legacy untouched until tested
 
 # Database Refactoring
 database_refactoring:
