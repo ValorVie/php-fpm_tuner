@@ -115,8 +115,8 @@ class Analyzer
             // 記憶體統計
             'avg_worker_mb' => !empty($avgWorkerMb) ? round(array_sum($avgWorkerMb) / count($avgWorkerMb), 1) : 0,
 
-            // 利用率
-            'utilization_avg' => $totalMax > 0 ? round(array_sum($active) / $count / $totalMax, 4) : 0,
+            // 利用率（逐採樣點計算）
+            'utilization_avg' => self::calculateAvgUtilization($active, $total),
             'utilization_max' => $totalMax > 0 ? round(max($active) / $totalMax, 4) : 0,
         ];
     }
@@ -342,5 +342,31 @@ class Analyzer
         }
 
         return $data[$lower] + ($index - $lower) * ($data[$upper] - $data[$lower]);
+    }
+
+    /**
+     * 計算平均利用率（逐採樣點）
+     *
+     * @param array $active 各時間點的活躍 worker 數
+     * @param array $total 各時間點的總 worker 數
+     * @return float
+     */
+    private static function calculateAvgUtilization(array $active, array $total)
+    {
+        $count = count($active);
+        if ($count === 0) {
+            return 0;
+        }
+
+        $sum = 0;
+        $validCount = 0;
+        for ($i = 0; $i < $count; $i++) {
+            if ($total[$i] > 0) {
+                $sum += $active[$i] / $total[$i];
+                $validCount++;
+            }
+        }
+
+        return $validCount > 0 ? round($sum / $validCount, 4) : 0;
     }
 }

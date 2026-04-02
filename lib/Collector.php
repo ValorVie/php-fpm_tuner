@@ -126,6 +126,18 @@ class Collector
             return false;
         }
 
+        if (!flock($fp, LOCK_EX)) {
+            fclose($fp);
+            fwrite(STDERR, "錯誤：無法取得檔案鎖定 {$path}\n");
+            return false;
+        }
+
+        // 重新檢查是否需要寫入標題（可能在等待鎖定期間被其他進程寫入）
+        clearstatcache(true, $path);
+        if ($writeHeader && filesize($path) > 0) {
+            $writeHeader = false;
+        }
+
         // 寫入標題列
         if ($writeHeader) {
             fputcsv($fp, self::CSV_HEADERS);
@@ -138,6 +150,7 @@ class Collector
         }
         fputcsv($fp, $row);
 
+        flock($fp, LOCK_UN);
         fclose($fp);
         return true;
     }
@@ -161,26 +174,12 @@ class Collector
         $maxSizeMb = isset($config['metrics_max_size_mb']) ? (int) $config['metrics_max_size_mb'] : 0;
         $maxRows = isset($config['metrics_max_rows']) ? (int) $config['metrics_max_rows'] : 0;
 
-        // 檢查是否需要清理
-        $needsPrune = false;
-        $currentSize = filesize($path);
-
-        // 大小限制檢查
-        if ($maxSizeMb > 0 && $currentSize > $maxSizeMb * 1024 * 1024) {
-            $needsPrune = true;
-            $result['action'] = 'size_limit';
-        }
-
-        // 時間或筆數限制需要讀取檔案才能確定
-        if (!$needsPrune && ($retentionHours > 0 || $maxRows > 0)) {
-            $needsPrune = true;
-        }
-
-        if (!$needsPrune) {
+        // 快速檢查：若無任何限制，直接返回
+        if ($retentionHours <= 0 && $maxSizeMb <= 0 && $maxRows <= 0) {
             return $result;
         }
 
-        // 讀取所有數據
+        // 第一遍：計算總行數
         $fp = fopen($path, 'r');
         if (!$fp) {
             return $result;
@@ -192,67 +191,105 @@ class Collector
             return $result;
         }
 
-        $rows = [];
+        $timestampIndex = array_search('timestamp', $headers);
+        $cutoffTime = $retentionHours > 0 ? strtotime("-{$retentionHours} hours") : 0;
+
+        $totalRows = 0;
+        $expiredRows = 0;
+
         while (($row = fgetcsv($fp)) !== false) {
-            if (count($row) === count($headers)) {
-                $rows[] = $row;
+            if (count($row) !== count($headers)) {
+                continue;
+            }
+            $totalRows++;
+
+            if ($retentionHours > 0 && $timestampIndex !== false) {
+                $rowTime = strtotime($row[$timestampIndex]);
+                if ($rowTime !== false && $rowTime < $cutoffTime) {
+                    $expiredRows++;
+                }
             }
         }
         fclose($fp);
 
-        $originalCount = count($rows);
-        $cutoffTime = $retentionHours > 0 ? strtotime("-{$retentionHours} hours") : 0;
+        // 計算要保留的行數
+        $keepCount = $totalRows - $expiredRows;
+        $action = $expiredRows > 0 ? 'time_limit' : 'none';
 
-        // 根據時間過濾
-        if ($retentionHours > 0) {
-            $timestampIndex = array_search('timestamp', $headers);
-            if ($timestampIndex !== false) {
-                $rows = array_filter($rows, function ($row) use ($timestampIndex, $cutoffTime) {
-                    $rowTime = strtotime($row[$timestampIndex]);
-                    return $rowTime !== false && $rowTime >= $cutoffTime;
-                });
-                $rows = array_values($rows);
-                if (count($rows) < $originalCount) {
-                    $result['action'] = 'time_limit';
+        if ($maxRows > 0 && $keepCount > $maxRows) {
+            $keepCount = $maxRows;
+            $action = 'row_limit';
+        }
+
+        if ($maxSizeMb > 0) {
+            $currentSize = filesize($path);
+            if ($currentSize > $maxSizeMb * 1024 * 1024) {
+                $estimatedRowSize = $currentSize / ($totalRows + 1);
+                $targetRows = (int) (($maxSizeMb * 1024 * 1024 * 0.8) / $estimatedRowSize);
+                if ($keepCount > $targetRows) {
+                    $keepCount = $targetRows;
+                    $action = 'size_limit';
                 }
             }
         }
 
-        // 根據筆數限制
-        if ($maxRows > 0 && count($rows) > $maxRows) {
-            $rows = array_slice($rows, -$maxRows);
-            $result['action'] = 'row_limit';
+        $removedCount = $totalRows - $keepCount;
+        if ($removedCount <= 0) {
+            return $result;
         }
 
-        // 根據大小限制（保留最新的 80%）
-        if ($maxSizeMb > 0 && count($rows) > 0) {
-            $estimatedRowSize = $currentSize / ($originalCount + 1);
-            $targetRows = (int) (($maxSizeMb * 1024 * 1024 * 0.8) / $estimatedRowSize);
-            if (count($rows) > $targetRows) {
-                $rows = array_slice($rows, -$targetRows);
-                $result['action'] = 'size_limit';
+        // 第二遍：流式寫入到暫存檔
+        $skipCount = $totalRows - $keepCount;
+        $tmpPath = $path . '.tmp.' . getmypid();
+
+        $fpIn = fopen($path, 'r');
+        if (!$fpIn) {
+            return $result;
+        }
+
+        $fpOut = fopen($tmpPath, 'w');
+        if (!$fpOut) {
+            fclose($fpIn);
+            return $result;
+        }
+
+        $headers = fgetcsv($fpIn);
+        fputcsv($fpOut, $headers);
+
+        $rowIndex = 0;
+        $written = 0;
+        while (($row = fgetcsv($fpIn)) !== false) {
+            if (count($row) !== count($headers)) {
+                continue;
             }
+            $rowIndex++;
+
+            if ($rowIndex <= $skipCount) {
+                continue;
+            }
+
+            if ($retentionHours > 0 && $timestampIndex !== false) {
+                $rowTime = strtotime($row[$timestampIndex]);
+                if ($rowTime !== false && $rowTime < $cutoffTime) {
+                    continue;
+                }
+            }
+
+            fputcsv($fpOut, $row);
+            $written++;
         }
 
-        $result['removed'] = $originalCount - count($rows);
-        $result['remaining'] = count($rows);
+        fclose($fpIn);
+        fclose($fpOut);
 
-        // 如果沒有刪除任何記錄，不需要重寫檔案
-        if ($result['removed'] === 0) {
+        if (!rename($tmpPath, $path)) {
+            @unlink($tmpPath);
             return $result;
         }
 
-        // 重寫檔案
-        $fp = fopen($path, 'w');
-        if (!$fp) {
-            return $result;
-        }
-
-        fputcsv($fp, $headers);
-        foreach ($rows as $row) {
-            fputcsv($fp, $row);
-        }
-        fclose($fp);
+        $result['removed'] = $totalRows - $written;
+        $result['remaining'] = $written;
+        $result['action'] = $action;
 
         return $result;
     }

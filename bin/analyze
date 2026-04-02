@@ -76,6 +76,13 @@ if (!$inputPath) {
     exit(1);
 }
 
+$realInputPath = realpath($inputPath);
+if ($realInputPath === false) {
+    fwrite(STDERR, "錯誤：找不到檔案 {$inputPath}\n");
+    exit(1);
+}
+$inputPath = $realInputPath;
+
 // 建立當前配置陣列
 $currentConfig = [
     'max_children' => isset($config['max_children']) ? (int) $config['max_children'] : 0,

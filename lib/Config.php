@@ -27,7 +27,18 @@ class Config
             return $default;
         }
 
-        $custom = require $path;
+        $realPath = realpath($path);
+        if ($realPath === false || pathinfo($realPath, PATHINFO_EXTENSION) !== 'php') {
+            fwrite(STDERR, "警告：配置檔路徑無效或非 .php 檔案：{$path}，使用預設配置\n");
+            return $default;
+        }
+
+        $custom = require $realPath;
+        if (!is_array($custom)) {
+            fwrite(STDERR, "警告：配置檔格式錯誤（需回傳陣列）：{$path}，使用預設配置\n");
+            return $default;
+        }
+
         return self::merge($default, $custom);
     }
 
@@ -88,6 +99,24 @@ class Config
                 continue;
             }
 
+            if ($arg === '--prune') {
+                $result['options']['prune'] = true;
+                $i++;
+                continue;
+            }
+
+            if ($arg === '--stats') {
+                $result['options']['stats'] = true;
+                $i++;
+                continue;
+            }
+
+            if ($arg === '--no-prune') {
+                $result['options']['no_prune'] = true;
+                $i++;
+                continue;
+            }
+
             if (strpos($arg, '--') === 0 && isset($argv[$i + 1])) {
                 $key = substr($arg, 2);
                 $key = str_replace('-', '_', $key);
@@ -128,6 +157,29 @@ class Config
 
         if (isset($config['min_worker_memory']) && $config['min_worker_memory'] < 1) {
             $errors[] = 'min_worker_memory 必須大於 0';
+        }
+
+        // spare ratio 交叉驗證
+        $minSpare = isset($config['min_spare_ratio']) ? $config['min_spare_ratio'] : 0;
+        $maxSpare = isset($config['max_spare_ratio']) ? $config['max_spare_ratio'] : 1;
+        $startServers = isset($config['start_servers_ratio']) ? $config['start_servers_ratio'] : 0;
+
+        if ($minSpare > $maxSpare) {
+            $errors[] = 'min_spare_ratio 不能大於 max_spare_ratio';
+        }
+        if ($startServers > $maxSpare) {
+            $errors[] = 'start_servers_ratio 不能大於 max_spare_ratio';
+        }
+
+        // 數值非負驗證
+        if (isset($config['max_requests']) && $config['max_requests'] < 0) {
+            $errors[] = 'max_requests 不能為負數';
+        }
+        if (isset($config['request_terminate_timeout']) && $config['request_terminate_timeout'] < 0) {
+            $errors[] = 'request_terminate_timeout 不能為負數';
+        }
+        if (isset($config['metrics_retention_hours']) && $config['metrics_retention_hours'] < 0) {
+            $errors[] = 'metrics_retention_hours 不能為負數';
         }
 
         return $errors;

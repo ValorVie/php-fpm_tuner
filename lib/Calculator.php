@@ -21,7 +21,7 @@ class Calculator
         $workerMemory = $systemInfo['worker_memory'];
 
         // 取得配置值（使用預設值作為後備）
-        $memoryReserveRatio = isset($config['memory_reserve_ratio']) ? $config['memory_reserve_ratio'] : 0.10;
+        $memoryReserveRatio = isset($config['memory_reserve_ratio']) ? $config['memory_reserve_ratio'] : 0.20;
         $startServersRatio = isset($config['start_servers_ratio']) ? $config['start_servers_ratio'] : 0.25;
         $startServersCpuMultiplier = isset($config['start_servers_cpu_multiplier']) ? $config['start_servers_cpu_multiplier'] : 4;
         $minSpareRatio = isset($config['min_spare_ratio']) ? $config['min_spare_ratio'] : 0.25;

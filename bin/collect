@@ -95,9 +95,9 @@ $config = Config::merge($config, $cliArgs['overrides']);
 
 // 取得參數
 $once = isset($cliArgs['options']['once']);
-$pruneOnly = isset($cliArgs['overrides']['prune']) || in_array('--prune', $argv);
-$showStats = isset($cliArgs['overrides']['stats']) || in_array('--stats', $argv);
-$noPrune = isset($cliArgs['overrides']['no_prune']) || in_array('--no-prune', $argv);
+$pruneOnly = isset($cliArgs['options']['prune']);
+$showStats = isset($cliArgs['options']['stats']);
+$noPrune = isset($cliArgs['options']['no_prune']);
 
 $interval = isset($config['interval']) ? (int) $config['interval'] : 60;
 $interval = isset($config['collect_interval']) ? (int) $config['collect_interval'] : $interval;
@@ -208,8 +208,21 @@ while (true) {
                 echo date('Y-m-d H:i:s') . " 已收集：active={$metrics['active']}, idle={$metrics['idle']}, queue={$metrics['listen_queue']}\n";
             }
 
-            // 定期清理（持續模式）或單次收集時清理
-            if (!$noPrune && ($once || $collectCount % $pruneInterval === 0)) {
+            // 定期清理
+            $shouldPrune = false;
+            if (!$noPrune) {
+                if (!$once && $collectCount % $pruneInterval === 0) {
+                    // 持續模式：每 N 次收集清理一次
+                    $shouldPrune = true;
+                } elseif ($once && ($maxSizeMb > 0 || $retentionHours > 0)) {
+                    // 單次模式：檔案超過大小限制或有時間保留設定時清理
+                    $currentFileSize = file_exists($outputPath) ? filesize($outputPath) : 0;
+                    $shouldPrune = ($maxSizeMb > 0 && $currentFileSize > $maxSizeMb * 1024 * 1024)
+                                 || ($retentionHours > 0 && $currentFileSize > 0);
+                }
+            }
+
+            if ($shouldPrune) {
                 $pruneResult = Collector::pruneData($outputPath, $pruneConfig);
                 if ($pruneResult['removed'] > 0 && !$once) {
                     echo date('Y-m-d H:i:s') . " 已清理 {$pruneResult['removed']} 筆過期記錄\n";

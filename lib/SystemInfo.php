@@ -80,7 +80,8 @@ class SystemInfo
             if ($meminfo && preg_match('~MemAvailable:\s+(\d+)\s+~', $meminfo, $matches)) {
                 $freeMemory = $matches[1] / 1024;
             }
-            // 回退：MemFree + Buffers + Cached
+            // 回退：MemFree + Buffers + Cached（適用於 Linux < 3.14，無 MemAvailable）
+            // 注意：在有大量 tmpfs 的系統上可能高估可用記憶體
             elseif ($meminfo && preg_match_all('~(MemFree|Buffers|Cached):\s+(\d+)\s+~', $meminfo, $matches, PREG_SET_ORDER)) {
                 $total = 0;
                 foreach ($matches as $match) {

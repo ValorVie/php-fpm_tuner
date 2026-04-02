@@ -29,6 +29,10 @@ if (!function_exists('ini_parse_quantity')) {
         }
 
         $value = trim($value);
+        if ($value === '') {
+            return 0;
+        }
+
         $unit = strtolower(substr($value, -1));
         $number = (int) substr($value, 0, -1);
 
